@@ -1,0 +1,64 @@
+# VidaSalud: backend completo en contenedores.
+#
+# Solo el BFF queda expuesto (puerto 8080). Oracle y los microservicios
+# viven en la red interna de Docker: desde fuera únicamente se puede
+# llegar a ellos a través del BFF, que valida el JWT en cada petición.
+
+services:
+
+  oracle:
+    image: gvenzl/oracle-xe:21-slim
+    environment:
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD}
+      APP_USER: vidasalud
+      APP_USER_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 60s
+    restart: unless-stopped
+
+  appointments:
+    build: ../ms-vidasalud-appointments
+    environment:
+      DB_URL: jdbc:oracle:thin:@//oracle:1521/XEPDB1
+      DB_USERNAME: vidasalud
+      DB_PASSWORD: ${DB_PASSWORD}
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    depends_on:
+      oracle:
+        condition: service_healthy
+    restart: unless-stopped
+
+  catalog:
+    build: ../ms-vidasalud-catalog
+    environment:
+      DB_URL: jdbc:oracle:thin:@//oracle:1521/XEPDB1
+      DB_USERNAME: vidasalud
+      DB_PASSWORD: ${DB_PASSWORD}
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    depends_on:
+      oracle:
+        condition: service_healthy
+    restart: unless-stopped
+
+  bff:
+    build: ${BFF_DIR:-../ms-vidasalud-bff}
+    environment:
+      APPOINTMENTS_URL: http://appointments:8081
+      CATALOG_URL: http://catalog:8082
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4200}
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    ports:
+      - "8080:8080"
+    depends_on:
+      - appointments
+      - catalog
+    restart: unless-stopped
+
+volumes:
+  oracle-data:
