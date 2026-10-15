@@ -1,0 +1,60 @@
+# VidaSalud · mensajería
+#
+# Clúster RabbitMQ de dos nodos. Se levanta por separado del compose
+# de las aplicaciones, siguiendo la topología del caso (ec2-apps y
+# ec2-mq), y ambos se comunican por la red externa vidasalud-net.
+
+services:
+
+  rabbit1:
+    image: rabbitmq:3.13-management
+    hostname: rabbit1
+    environment:
+      # La cookie debe ser idéntica en los dos nodos: es la clave
+      # compartida con la que Erlang autoriza la comunicación entre ellos.
+      RABBITMQ_ERLANG_COOKIE: ${RABBITMQ_COOKIE}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    ports:
+      - "5672:5672"      # AMQP: por aquí publican y consumen los microservicios
+      - "15672:15672"    # Consola web de administración
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    networks:
+      - vidasalud-net
+    restart: unless-stopped
+
+  rabbit2:
+    image: rabbitmq:3.13-management
+    hostname: rabbit2
+    environment:
+      RABBITMQ_ERLANG_COOKIE: ${RABBITMQ_COOKIE}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    depends_on:
+      rabbit1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    networks:
+      - vidasalud-net
+    restart: unless-stopped
+
+networks:
+  vidasalud-net:
+    external: true
