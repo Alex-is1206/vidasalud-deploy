@@ -3,6 +3,15 @@
 # Solo el BFF queda expuesto (puerto 8080). Oracle y los microservicios
 # viven en la red interna de Docker: desde fuera únicamente se puede
 # llegar a ellos a través del BFF, que valida el JWT en cada petición.
+#
+# RabbitMQ se levanta aparte (mq/compose.yml) y vive en la red externa
+# vidasalud-net. Los servicios que publican o consumen eventos se unen
+# también a esa red, donde rabbit1 y rabbit2 se resuelven por nombre.
+# Dentro de Docker nunca se usa localhost para llegar a otro contenedor.
+#
+# Orden de arranque: primero mq (docker compose up -d en mq/), después este.
+# Compose no permite depends_on hacia servicios de otro archivo; si un
+# servicio arranca antes que el broker, restart: unless-stopped lo reintenta.
 
 services:
 
@@ -28,10 +37,16 @@ services:
       DB_URL: jdbc:oracle:thin:@//oracle:1521/XEPDB1
       DB_USERNAME: vidasalud
       DB_PASSWORD: ${DB_PASSWORD}
+      RABBITMQ_ADDRESSES: rabbit1:5672,rabbit2:5672
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       JAVA_TOOL_OPTIONS: -Xmx256m
     depends_on:
       oracle:
         condition: service_healthy
+    networks:
+      - default          # para llegar a Oracle
+      - vidasalud-net    # para publicar en RabbitMQ
     restart: unless-stopped
 
   catalog:
@@ -40,14 +55,20 @@ services:
       DB_URL: jdbc:oracle:thin:@//oracle:1521/XEPDB1
       DB_USERNAME: vidasalud
       DB_PASSWORD: ${DB_PASSWORD}
+      RABBITMQ_ADDRESSES: rabbit1:5672,rabbit2:5672
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       JAVA_TOOL_OPTIONS: -Xmx256m
     depends_on:
       oracle:
         condition: service_healthy
+    networks:
+      - default
+      - vidasalud-net
     restart: unless-stopped
 
   bff:
-    build: ${BFF_DIR:-../ms-vidasalud-bff}
+    build: ${BFF_DIR:-../ms-vidasalud-bff-mio}
     environment:
       APPOINTMENTS_URL: http://appointments:8081
       CATALOG_URL: http://catalog:8082
@@ -60,5 +81,38 @@ services:
       - catalog
     restart: unless-stopped
 
+  # Consumidor de eventos. No expone puertos: solo escucha colas.
+  notify:
+    build: ../ms-vidasalud-notify
+    environment:
+      RABBITMQ_ADDRESSES: rabbit1:5672,rabbit2:5672
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    networks:
+      - vidasalud-net
+    restart: unless-stopped
+
+  # API de administración de colas. No tiene autenticación, así que
+  # escucha solo en 127.0.0.1: desde fuera se usa por túnel SSH,
+  # igual que la consola 15672.
+  rabbit-admin:
+    build: ../ms-vidasalud-rabbit-admin
+    environment:
+      RABBITMQ_ADDRESSES: rabbit1:5672,rabbit2:5672
+      RABBITMQ_MGMT_URL: http://rabbit1:15672
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    ports:
+      - "127.0.0.1:8084:8084"
+    networks:
+      - vidasalud-net
+    restart: unless-stopped
+
 volumes:
   oracle-data:
+
+networks:
+  vidasalud-net:
+    external: true
