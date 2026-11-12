@@ -4,12 +4,16 @@
 # viven en la red interna de Docker: desde fuera únicamente se puede
 # llegar a ellos a través del BFF, que valida el JWT en cada petición.
 #
-# RabbitMQ se levanta aparte (mq/compose.yml) y vive en la red externa
-# vidasalud-net. Los servicios que publican o consumen eventos se unen
-# también a esa red, donde rabbit1 y rabbit2 se resuelven por nombre.
+# RabbitMQ (mq/compose.yml) y Kafka (kafka/compose.yml) se levantan aparte
+# y viven en la red externa vidasalud-net. Los servicios que publican o
+# consumen eventos se unen también a esa red, donde rabbit1/rabbit2 y
+# kafka1/kafka2/kafka3 se resuelven por nombre.
 # Dentro de Docker nunca se usa localhost para llegar a otro contenedor.
 #
-# Orden de arranque: primero mq (docker compose up -d en mq/), después este.
+# Orden de arranque:
+#   1. Red externa: docker network create vidasalud-net
+#   2. Brokers:     docker compose up -d en mq/ y en kafka/
+#   3. Backend:     docker compose up -d en esta raíz
 # Compose no permite depends_on hacia servicios de otro archivo; si un
 # servicio arranca antes que el broker, restart: unless-stopped lo reintenta.
 
@@ -40,13 +44,14 @@ services:
       RABBITMQ_ADDRESSES: rabbit1:5672,rabbit2:5672
       RABBITMQ_USER: ${RABBITMQ_USER}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP:-kafka1:29092,kafka2:29092,kafka3:29092}
       JAVA_TOOL_OPTIONS: -Xmx256m
     depends_on:
       oracle:
         condition: service_healthy
     networks:
       - default          # para llegar a Oracle
-      - vidasalud-net    # para publicar en RabbitMQ
+      - vidasalud-net    # para publicar en RabbitMQ y Kafka
     restart: unless-stopped
 
   catalog:
@@ -58,6 +63,7 @@ services:
       RABBITMQ_ADDRESSES: rabbit1:5672,rabbit2:5672
       RABBITMQ_USER: ${RABBITMQ_USER}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP:-kafka1:29092,kafka2:29092,kafka3:29092}
       JAVA_TOOL_OPTIONS: -Xmx256m
     depends_on:
       oracle:
@@ -67,11 +73,31 @@ services:
       - vidasalud-net
     restart: unless-stopped
 
+  # Consumidor de streaming en Kafka (grupos vidasalud-analitica y vidasalud-historial).
+  # Mantiene métricas en memoria y guarda el historial de atenciones en Oracle.
+  # No expone puertos al exterior: el BFF lo consulta internamente en el 8086.
+  analytics:
+    build: ../ms-vidasalud-analytics
+    environment:
+      DB_URL: jdbc:oracle:thin:@//oracle:1521/XEPDB1
+      DB_USERNAME: vidasalud
+      DB_PASSWORD: ${DB_PASSWORD}
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP:-kafka1:29092,kafka2:29092,kafka3:29092}
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    depends_on:
+      oracle:
+        condition: service_healthy
+    networks:
+      - default          # para guardar HISTORIAL_ATENCION en Oracle
+      - vidasalud-net    # para consumir tópicos de Kafka
+    restart: unless-stopped
+
   bff:
     build: ${BFF_DIR:-../ms-vidasalud-bff-mio}
     environment:
       APPOINTMENTS_URL: http://appointments:8081
       CATALOG_URL: http://catalog:8082
+      ANALYTICS_URL: http://analytics:8086
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4200}
       JAVA_TOOL_OPTIONS: -Xmx256m
     ports:
@@ -81,7 +107,7 @@ services:
       - catalog
     restart: unless-stopped
 
-  # Consumidor de eventos. No expone puertos: solo escucha colas.
+  # Consumidor de eventos RabbitMQ. No expone puertos: solo escucha colas.
   notify:
     build: ../ms-vidasalud-notify
     environment:
@@ -93,9 +119,8 @@ services:
       - vidasalud-net
     restart: unless-stopped
 
-  # API de administración de colas. No tiene autenticación, así que
-  # escucha solo en 127.0.0.1: desde fuera se usa por túnel SSH,
-  # igual que la consola 15672.
+  # API de administración de colas RabbitMQ. Escucha solo en 127.0.0.1:
+  # desde fuera se usa por túnel SSH, igual que la consola 15672.
   rabbit-admin:
     build: ../ms-vidasalud-rabbit-admin
     environment:
@@ -106,6 +131,21 @@ services:
       JAVA_TOOL_OPTIONS: -Xmx256m
     ports:
       - "127.0.0.1:8084:8084"
+    networks:
+      - vidasalud-net
+    restart: unless-stopped
+
+  # API de administración de tópicos y consumer groups de Kafka.
+  # Escucha solo en 127.0.0.1:8085 para acceso por túnel SSH,
+  # igual que rabbit-admin (8084) y Kafka UI (8090).
+  kafka-admin:
+    build: ../ms-vidasalud-kafka-admin
+    environment:
+      SERVER_PORT: 8085
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP:-kafka1:29092,kafka2:29092,kafka3:29092}
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    ports:
+      - "127.0.0.1:8085:8085"
     networks:
       - vidasalud-net
     restart: unless-stopped
